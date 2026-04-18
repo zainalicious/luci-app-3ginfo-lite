@@ -1,0 +1,101 @@
+# SIMCOM SIM8202G-M2
+
+# ========== Temperature ==========
+OT=$(sms_tool -d $DEVICE at "AT+CPMUTEMP")
+T=$(echo "$OT" | awk -F[,:] '/^\+CPMUTEMP: / {print $2}' | xargs)
+[ -n "$T" ] && TEMP="$T &deg;C"
+
+# ========== Modem Info (cara SIM8200EA) ==========
+OF=$(sms_tool -d $DEVICE at "AT+CGMR")
+FW=$(echo "$OF" | awk -F [:] '/^\+CGMR: /{print $2}' | xargs)
+
+OL=$(sms_tool -d $DEVICE at "AT+CGMM")
+MODEL=$(echo "$OL" | sed s/"AT+CGMM"// | tr -s "\n" | xargs)
+[ -n "$MODEL" ] && MODEL="$(echo $MODEL | sed 's,_, ,')"
+
+OM=$(sms_tool -d $DEVICE at "AT+CGSN")
+NR_IMEI=$(echo "$OM" | sed s/"AT+CGSN"// | xargs)
+
+OC=$(sms_tool -d $DEVICE at "AT+CIMI")
+NR_IMSI=$(echo "$OC" | sed s/"AT+CIMI"// | tr -s "\n" | xargs)
+
+OI=$(sms_tool -d $DEVICE at "AT+ICCID")
+NR_ICCID=$(echo "$OI" | awk -F [:] '/^\+ICCID: /{print $2}' | xargs)
+
+# ========== CA Info dari CCAINFO ==========
+O_CA=$(sms_tool -d $DEVICE at "AT+CCAINFO?" 2>/dev/null)
+
+# PCC
+T_PCC=$(echo "$O_CA" | grep -E '^\+CCAINFO: "PCC"' | head -1)
+if [ -n "$T_PCC" ]; then
+    BAND_RAW=$(echo "$T_PCC" | awk -F',' '{print $2}' | sed 's/EUTRA_BAND//')
+    EARFCN=$(echo "$T_PCC" | awk -F',' '{print $3}')
+    PCI=$(echo "$T_PCC" | awk -F',' '{print $5}')
+    RSRP=$(echo "$T_PCC" | awk -F',' '{print $6}')
+    RSRQ=$(echo "$T_PCC" | awk -F',' '{print $7}')
+    [ -n "$BAND_RAW" ] && PBAND="B$BAND_RAW"
+fi
+
+# SCC
+SCC1_BAND=$(echo "$O_CA" | grep -E '^\+CCAINFO: "SCC"' | sed -n '1p' | awk -F',' '{print $2}' | sed 's/EUTRA_BAND//')
+SCC1_EARFCN=$(echo "$O_CA" | grep -E '^\+CCAINFO: "SCC"' | sed -n '1p' | awk -F',' '{print $3}')
+SCC1_PCI=$(echo "$O_CA" | grep -E '^\+CCAINFO: "SCC"' | sed -n '1p' | awk -F',' '{print $5}')
+
+SCC2_BAND=$(echo "$O_CA" | grep -E '^\+CCAINFO: "SCC"' | sed -n '2p' | awk -F',' '{print $2}' | sed 's/EUTRA_BAND//')
+SCC2_EARFCN=$(echo "$O_CA" | grep -E '^\+CCAINFO: "SCC"' | sed -n '2p' | awk -F',' '{print $3}')
+SCC2_PCI=$(echo "$O_CA" | grep -E '^\+CCAINFO: "SCC"' | sed -n '2p' | awk -F',' '{print $5}')
+
+[ -n "$SCC1_BAND" ] && S1BAND="B$SCC1_BAND"
+[ -n "$SCC1_EARFCN" ] && S1EARFCN="$SCC1_EARFCN"
+[ -n "$SCC1_PCI" ] && [ "$SCC1_PCI" != "-" ] && S1PCI="$SCC1_PCI"
+
+[ -n "$SCC2_BAND" ] && S2BAND="B$SCC2_BAND"
+[ -n "$SCC2_EARFCN" ] && S2EARFCN="$SCC2_EARFCN"
+[ -n "$SCC2_PCI" ] && [ "$SCC2_PCI" != "-" ] && S2PCI="$SCC2_PCI"
+
+# Mode
+if echo "$O_CA" | grep -q "SCC"; then
+    MODE="LTE-A | $PBAND"
+else
+    MODE="LTE | $PBAND"
+fi
+
+# ========== CSQ ==========
+T_CSQ=$(sms_tool -d $DEVICE at "AT+CSQ" 2>/dev/null | grep -E '^\+CSQ:' | head -1)
+if [ -n "$T_CSQ" ]; then
+    CSQ_VAL=$(echo "$T_CSQ" | awk -F',' '{print $1}' | awk '{print $2}')
+    if [ -n "$CSQ_VAL" ] && [ "$CSQ_VAL" != "99" ]; then
+        CSQ="$CSQ_VAL"
+        CSQ_PER=$((CSQ_VAL * 100 / 31))
+        RSSI=$((2 * CSQ_VAL - 113))
+    fi
+fi
+
+# ========== Registration ==========
+O_REG=$(sms_tool -d $DEVICE at "AT+CREG=2;+CREG?" 2>/dev/null)
+T_CREG=$(echo "$O_REG" | grep -E '^\+CREG:' | head -1)
+if [ -n "$T_CREG" ]; then
+    LAC_DEC=$(echo "$T_CREG" | awk -F',' '{print $3}' | tr -d ' ')
+    [ -n "$LAC_DEC" ] && [ "$LAC_DEC" != "0" ] && LAC_HEX=$(printf "%X" "$LAC_DEC" 2>/dev/null)
+    CID_HEX=$(echo "$T_CREG" | awk -F',' '{print $4}' | tr -d ' ')
+    [ -n "$CID_HEX" ] && CID_DEC=$(printf "%d" "0x$CID_HEX" 2>/dev/null)
+fi
+
+# Protocol
+# DRIVER=QMI_WWAN & DRIVER=CDC_MBIM & DRIVER=CDC_ETHER
+PV=$(cat /sys/kernel/debug/usb/devices 2>/dev/null)
+PVCUT=$(echo $PV | awk -F 'Vendor=1e0e ProdID=9011' '{print $2}' | cut -c-1290)
+
+if echo "$PVCUT" | grep -q "Driver=qmi_wwan"
+then
+    PROTO="qmi"
+elif echo "$PVCUT" | grep -q "Driver=cdc_mbim"
+then
+    PROTO="mbim"
+elif echo "$PVCUT" | grep -q "Driver=cdc_ether"
+then
+    PROTO="ecm"
+elif echo "$PVCUT" | grep -q "Driver=rndis_host"
+then
+    PROTO="rndis"
+fi
